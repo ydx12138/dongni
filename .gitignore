@@ -1,0 +1,73 @@
+# Go 编译产物
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+blog.exe
+blog
+main
+
+# Go 测试覆盖率
+*.out
+*.test
+coverage.html
+
+# Go 模块缓存
+vendor/
+
+# Go 编译缓存
+.gocache/
+
+# 配置文件（包含敏感信息）
+settings.yaml
+.env
+.env.*
+
+# 日志
+logs/
+log/
+*.log
+
+# 上传文件
+uploads/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.sublime-*
+*.project
+*.classpath
+.settings/
+
+# OS 文件
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Docker 运行时数据（目录保留，内容忽略）
+deploy/mysql/data/*
+!deploy/mysql/data/.gitkeep
+deploy/redis/data/*
+!deploy/redis/data/.gitkeep
+deploy/nginx/logs/*
+!deploy/nginx/logs/.gitkeep
+
+# 临时文件
+tmp/
+temp/
+
+# 调试文件
+debug
+__debug_bin
+
+# 空目录占位
+!logs/.gitkeep
+!uploads/.gitkeep
+.worktrees/
+/.tmp-go-cache
+/.tmp-go-build
+/.gocache

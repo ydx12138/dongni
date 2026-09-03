@@ -71,3 +71,4 @@ __debug_bin
 /.tmp-go-cache
 /.tmp-go-build
 /.gocache
+/docs

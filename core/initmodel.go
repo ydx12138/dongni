@@ -25,4 +25,7 @@ func InitModel(db *gorm.DB) {
 	if err != nil {
 		zap.L().Panic("migrate tables failed: " + err.Error())
 	}
+	if err := db.Model(&model2.Category{}).Where("cover = ? OR cover IS NULL", "").Update("cover", model2.DefaultCategoryCover).Error; err != nil {
+		zap.L().Panic("normalize empty category covers failed: " + err.Error())
+	}
 }

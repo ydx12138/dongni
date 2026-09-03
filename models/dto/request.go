@@ -17,8 +17,10 @@ type ArticleKeyWord struct {
 }
 
 type AdminLogin struct {
-	Username string `form:"username" json:"username" binding:"required"`
-	Password string `form:"password" json:"password" binding:"required"`
+	Username    string `form:"username" json:"username" binding:"required"`
+	Password    string `form:"password" json:"password" binding:"required"`
+	CaptchaID   string `form:"captcha_id" json:"captcha_id" binding:"required"`
+	CaptchaCode string `form:"captcha_code" json:"captcha_code" binding:"required,len=4"`
 }
 
 type UserRegister struct {
@@ -148,12 +150,14 @@ type UpdateUserAvatarRequest struct {
 type CreateCategoryReq struct {
 	Name        string `json:"name" binding:"required"`
 	Description string `json:"description"`
+	Cover       string `json:"cover"`
 	Sort        int    `json:"sort"`
 }
 
 type UpdateCategoryReq struct {
 	Name        string `json:"name" binding:"required"`
 	Description string `json:"description"`
+	Cover       string `json:"cover"`
 }
 
 type UpdateCategorySortReq struct {

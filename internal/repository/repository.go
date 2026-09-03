@@ -364,6 +364,7 @@ func (r *Repository) AdminGetCategories(keyword string) ([]map[string]interface{
 			"id":            cat.ID,
 			"name":          cat.Name,
 			"description":   cat.Description,
+			"cover":         cat.Cover,
 			"sort":          cat.Sort,
 			"article_count": count,
 			"created_at":    cat.CreatedAt.Format("2006-01-02 15:04:05"),
@@ -401,6 +402,7 @@ func (r *Repository) UpdateCategory(cat *models.Category) error {
 	return r.db.Model(cat).Updates(map[string]interface{}{
 		"name":        cat.Name,
 		"description": cat.Description,
+		"cover":       cat.Cover,
 	}).Error
 }
 
@@ -485,7 +487,7 @@ func (r *Repository) GetOrCreateDefaultCategory() (models.Category, error) {
 	if err := r.db.Where("name = ?", "杂谈").First(&cat).Error; err == nil {
 		return cat, nil
 	}
-	cat = models.Category{Name: "杂谈", Description: "未分类的杂谈文章", Sort: 0}
+	cat = models.Category{Name: "杂谈", Description: "未分类的杂谈文章", Cover: models.DefaultCategoryCover, Sort: 0}
 	err := r.db.Create(&cat).Error
 	return cat, err
 }
@@ -577,18 +579,8 @@ func (r *Repository) DeleteComment(id uint64) error {
 	return r.db.Delete(&models.Comment{}, id).Error
 }
 
-type DashboardData struct {
-	TotalArticles     int64 `json:"total_articles"`
-	PublishedArticles int64 `json:"published_articles"`
-	DraftArticles     int64 `json:"draft_articles"`
-	TotalComments     int64 `json:"total_comments"`
-	PendingComments   int64 `json:"pending_comments"`
-	TotalUsers        int64 `json:"total_users"`
-	TotalViews        int64 `json:"total_views"`
-}
-
-func (r *Repository) GetDashboard() (DashboardData, error) {
-	var data DashboardData
+func (r *Repository) GetDashboard() (vo.DashboardData, error) {
+	var data vo.DashboardData
 	if err := r.db.Model(&models.Article{}).Count(&data.TotalArticles).Error; err != nil {
 		return data, err
 	}
@@ -607,8 +599,142 @@ func (r *Repository) GetDashboard() (DashboardData, error) {
 	if err := r.db.Model(&models.User{}).Count(&data.TotalUsers).Error; err != nil {
 		return data, err
 	}
-	err := r.db.Model(&models.Article{}).Select("COALESCE(SUM(view_count), 0)").Scan(&data.TotalViews).Error
-	return data, err
+	if err := r.db.Model(&models.Comment{}).Where("status = ?", 2).Count(&data.HiddenComments).Error; err != nil {
+		return data, err
+	}
+	if err := r.db.Model(&models.Category{}).Count(&data.TotalCategories).Error; err != nil {
+		return data, err
+	}
+	if err := r.db.Model(&models.Article{}).Where("category_id = ?", 0).Count(&data.UncategorizedArticles).Error; err != nil {
+		return data, err
+	}
+	if err := r.db.Model(&models.Article{}).Select("COALESCE(SUM(view_count), 0)").Scan(&data.TotalViews).Error; err != nil {
+		return data, err
+	}
+	if err := r.db.Model(&models.Article{}).Select("COALESCE(SUM(like_count), 0)").Scan(&data.TotalLikes).Error; err != nil {
+		return data, err
+	}
+
+	start := dashboardStartOfDay(time.Now(), 14)
+	if err := r.db.Model(&models.Article{}).Where("created_at >= ?", start).Count(&data.NewArticles).Error; err != nil {
+		return data, err
+	}
+	if err := r.db.Model(&models.User{}).Where("created_at >= ?", start).Count(&data.NewUsers).Error; err != nil {
+		return data, err
+	}
+	if err := r.db.Model(&models.Comment{}).Where("created_at >= ?", start).Count(&data.NewComments).Error; err != nil {
+		return data, err
+	}
+
+	articleCounts, err := r.dashboardDateCounts(&models.Article{}, start)
+	if err != nil {
+		return data, err
+	}
+	userCounts, err := r.dashboardDateCounts(&models.User{}, start)
+	if err != nil {
+		return data, err
+	}
+	commentCounts, err := r.dashboardDateCounts(&models.Comment{}, start)
+	if err != nil {
+		return data, err
+	}
+	data.Trend = buildDashboardTrend(start, 14, articleCounts, userCounts, commentCounts)
+
+	data.TopArticles = make([]vo.DashboardArticleMetric, 0)
+	if err := r.db.Model(&models.Article{}).
+		Select("article.id, article.title, c.name AS category_name, article.view_count, article.like_count, article.comment_count").
+		Joins("LEFT JOIN category c ON article.category_id = c.id").
+		Where("article.status = ?", 2).
+		Order("article.view_count DESC, article.like_count DESC, article.comment_count DESC, article.id DESC").
+		Limit(5).
+		Scan(&data.TopArticles).Error; err != nil {
+		return data, err
+	}
+
+	data.Categories = make([]vo.DashboardCategoryMetric, 0)
+	if err := r.db.Model(&models.Category{}).
+		Select("category.id, category.name, COUNT(article.id) AS article_count, COALESCE(SUM(article.view_count), 0) AS view_count").
+		Joins("LEFT JOIN article ON article.category_id = category.id").
+		Group("category.id, category.name, category.sort").
+		Order("article_count DESC, category.sort DESC, category.id DESC").
+		Limit(6).
+		Scan(&data.Categories).Error; err != nil {
+		return data, err
+	}
+
+	data.RecentArticles = make([]vo.DashboardRecentArticle, 0)
+	if err := r.db.Model(&models.Article{}).
+		Select("article.id, article.title, c.name AS category_name, article.status, article.created_at").
+		Joins("LEFT JOIN category c ON article.category_id = c.id").
+		Order("article.created_at DESC, article.id DESC").
+		Limit(5).
+		Scan(&data.RecentArticles).Error; err != nil {
+		return data, err
+	}
+
+	data.RecentComments = make([]vo.DashboardRecentComment, 0)
+	if err := r.db.Model(&models.Comment{}).
+		Select("comment.id, comment.article_id, article.title AS article_title, user.nickname, comment.content, comment.status, comment.created_at").
+		Joins("LEFT JOIN article ON comment.article_id = article.id").
+		Joins("LEFT JOIN user ON comment.user_id = user.id").
+		Order("comment.created_at DESC, comment.id DESC").
+		Limit(5).
+		Scan(&data.RecentComments).Error; err != nil {
+		return data, err
+	}
+
+	data.RecentUsers = make([]vo.DashboardRecentUser, 0)
+	if err := r.db.Model(&models.User{}).
+		Select("id, nickname, email, status, created_at").
+		Order("created_at DESC, id DESC").
+		Limit(5).
+		Scan(&data.RecentUsers).Error; err != nil {
+		return data, err
+	}
+	return data, nil
+}
+
+type dashboardDateCount struct {
+	Date  string `gorm:"column:date"`
+	Count int64  `gorm:"column:count"`
+}
+
+// dashboardDateCounts 按日期汇总指定模型的新增记录；参数为 GORM 模型和起始时间；返回日期到数量的映射及查询错误。
+func (r *Repository) dashboardDateCounts(model interface{}, start time.Time) (map[string]int64, error) {
+	counts := make([]dashboardDateCount, 0)
+	if err := r.db.Model(model).
+		Select("DATE(created_at) AS date, COUNT(*) AS count").
+		Where("created_at >= ?", start).
+		Group("DATE(created_at)").
+		Scan(&counts).Error; err != nil {
+		return nil, err
+	}
+	result := make(map[string]int64, len(counts))
+	for _, count := range counts {
+		result[count.Date] = count.Count
+	}
+	return result, nil
+}
+
+// dashboardStartOfDay 计算趋势统计的起始自然日；参数为当前时间和统计天数；返回本地时区零点时间。
+func dashboardStartOfDay(now time.Time, days int) time.Time {
+	localNow := now.In(time.Local)
+	return time.Date(localNow.Year(), localNow.Month(), localNow.Day()-days+1, 0, 0, 0, 0, time.Local)
+}
+
+// buildDashboardTrend 将各类日期统计补齐为连续趋势；参数为起始日期、天数及三类统计映射；返回完整趋势序列。
+func buildDashboardTrend(start time.Time, days int, articles, users, comments map[string]int64) []vo.DashboardTrendPoint {
+	trend := make([]vo.DashboardTrendPoint, 0, days)
+	for offset := 0; offset < days; offset++ {
+		date := start.AddDate(0, 0, offset).Format("2006-01-02")
+		trend = append(trend, vo.DashboardTrendPoint{
+			Date:     date,
+			Articles: articles[date],
+			Users:    users[date],
+			Comments: comments[date],
+		})
+	}
+	return trend
 }
 
 func (r *Repository) SaveToken(userID uint64, token string) error {

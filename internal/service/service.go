@@ -185,22 +185,26 @@ func (s *Service) issuePCUserTokens(user models.User) (map[string]interface{}, e
 	if s.sessionRepo == nil {
 		return nil, errors.New("session repository is nil")
 	}
+	tokenDuration, err := s.UserTokenDuration()
+	if err != nil {
+		return nil, err
+	}
 	sessionID, err := generateSessionID()
 	if err != nil {
 		return nil, err
 	}
-	refreshToken, err := utils.GenerateUserTokenWithSession(user.ID, pcSessionTTL, "refresh", sessionID)
+	refreshToken, err := utils.GenerateUserTokenWithSession(user.ID, tokenDuration, "refresh", sessionID)
 	if err != nil {
 		return nil, err
 	}
-	accessToken, err := utils.GenerateUserTokenWithSession(user.ID, 15*time.Minute, "access", sessionID)
+	accessToken, err := utils.GenerateUserTokenWithSession(user.ID, tokenDuration, "access", sessionID)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.sessionRepo.SaveUserSession(user.ID, sessionID, pcSessionTTL); err != nil {
+	if err := s.sessionRepo.SaveUserSession(user.ID, sessionID, tokenDuration); err != nil {
 		return nil, err
 	}
-	if err := s.SaveRefreshToken(refreshTokenKey(user.ID), refreshToken, pcSessionTTL); err != nil {
+	if err := s.SaveRefreshToken(refreshTokenKey(user.ID), refreshToken, tokenDuration); err != nil {
 		return nil, err
 	}
 	return map[string]interface{}{
@@ -731,6 +735,7 @@ func (s *Service) CreateCategory(req dto.CreateCategoryReq) error {
 	cat := models.Category{
 		Name:        req.Name,
 		Description: req.Description,
+		Cover:       normalizeCategoryCover(req.Cover),
 		Sort:        req.Sort,
 	}
 	return s.repo.CreateCategory(&cat)
@@ -752,7 +757,17 @@ func (s *Service) UpdateCategory(id uint64, req dto.UpdateCategoryReq) error {
 	}
 	cat.Name = req.Name
 	cat.Description = req.Description
+	cat.Cover = normalizeCategoryCover(req.Cover)
 	return s.repo.UpdateCategory(&cat)
+}
+
+// normalizeCategoryCover 统一分类封面地址；参数为请求提交的封面 URL；返回非空 URL，空值时返回系统默认封面。
+func normalizeCategoryCover(cover string) string {
+	cover = strings.TrimSpace(cover)
+	if cover == "" {
+		return models.DefaultCategoryCover
+	}
+	return cover
 }
 
 func (s *Service) UpdateCategorySort(id uint64, sort int) error {
@@ -853,7 +868,11 @@ func (s *Service) AdminLogin(req dto.AdminLogin) (map[string]interface{}, error)
 	if err != nil {
 		return nil, err
 	}
-	token, err := utils.GenerateAdminToken(admin.ID, 7*24*time.Hour)
+	tokenDuration, err := s.AdminTokenDuration()
+	if err != nil {
+		return nil, err
+	}
+	token, err := utils.GenerateAdminToken(admin.ID, tokenDuration)
 	if err != nil {
 		return nil, err
 	}
@@ -864,7 +883,7 @@ func (s *Service) AdminLogin(req dto.AdminLogin) (map[string]interface{}, error)
 	}, nil
 }
 
-func (s *Service) Dashboard() (repository.DashboardData, error) {
+func (s *Service) Dashboard() (vo.DashboardData, error) {
 	return s.repo.GetDashboard()
 }
 

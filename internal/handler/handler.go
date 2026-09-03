@@ -154,9 +154,15 @@ func (h *UserHandler) TokenRefresh(c *gin.Context) {
 		response.ErrWithMsg(code.UserBanned, c)
 		return
 	}
+	tokenDuration, err := h.svc.UserTokenDuration()
+	if err != nil {
+		zap.L().Error("read user token duration failed: " + err.Error())
+		response.ErrWithMsg(code.InternalError, c)
+		return
+	}
 	//如果type==refresh,有效，且redis里存在，则创建新accessToken，Abort+return
 	if claim.Type == "refresh" && data.Valid && h.svc.RefreshTokenIsExist(strconv.FormatUint(claim.UserID, 10)) == true {
-		accessToken, err := utils.GenerateUserTokenWithSession(claim.UserID, 15*time.Minute, "access", claim.SessionID)
+		accessToken, err := utils.GenerateUserTokenWithSession(claim.UserID, tokenDuration, "access", claim.SessionID)
 		if err != nil {
 			zap.L().Error("generate access token failed" + err.Error())
 			response.ErrWithMsg(code.InternalError, c)
@@ -690,6 +696,10 @@ func (h *AdminHandler) Login(c *gin.Context) {
 	var req dto.AdminLogin
 	if err := c.ShouldBind(&req); err != nil {
 		response.ErrWithMsg(code.BadRequest, c)
+		return
+	}
+	if !base64Captcha.DefaultMemStore.Verify(req.CaptchaID, req.CaptchaCode, true) {
+		response.ErrWithMsg(code.ErrCaptcha, c)
 		return
 	}
 	data, err := h.svc.AdminLogin(req)

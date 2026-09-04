@@ -14,24 +14,29 @@ import (
 )
 
 const (
-	settingRegisterEnabled         = "register_enabled"
-	settingCategoriesEnabled       = "categories_enabled"
-	settingProfileEnabled          = "profile_enabled"
-	settingCommentsEnabled         = "comments_enabled"
-	settingSiteTitle               = "site_title"
-	settingProfileGithub           = "profile_github"
-	settingProfileEmail            = "profile_email"
-	settingProfileAvatar           = "profile_avatar"
-	settingProfileAbout            = "profile_about"
-	settingUserTokenExpireMinutes  = "user_token_expire_minutes"
-	settingAdminTokenExpireMinutes = "admin_token_expire_minutes"
+	settingRegisterEnabled               = "register_enabled"
+	settingCategoriesEnabled             = "categories_enabled"
+	settingProfileEnabled                = "profile_enabled"
+	settingCommentsEnabled               = "comments_enabled"
+	settingLikeEnabled                   = "like_enabled"
+	settingSiteTitle                     = "site_title"
+	settingProfileGithub                 = "profile_github"
+	settingProfileEmail                  = "profile_email"
+	settingProfileAvatar                 = "profile_avatar"
+	settingProfileAbout                  = "profile_about"
+	settingUserAccessTokenExpireMinutes  = "user_access_token_expire_minutes"
+	settingUserRefreshTokenExpireMinutes = "user_refresh_token_expire_minutes"
+	settingAdminTokenExpireMinutes       = "admin_token_expire_minutes"
+	// legacyUserTokenExpireMinutes 是旧版统一用户 Token 有效期的配置键，仅用于迁移读取，不再写入。
+	legacyUserTokenExpireMinutes = "user_token_expire_minutes"
 )
 
 const (
-	defaultUserTokenExpireMinutes  = 15
-	defaultAdminTokenExpireMinutes = 7 * 24 * 60
-	minTokenExpireMinutes          = 1
-	maxTokenExpireMinutes          = 999999
+	defaultUserAccessTokenExpireMinutes  = 15
+	defaultUserRefreshTokenExpireMinutes = 7 * 24 * 60
+	defaultAdminTokenExpireMinutes       = 7 * 24 * 60
+	minTokenExpireMinutes                = 1
+	maxTokenExpireMinutes                = 999999
 )
 
 var siteSettingKeys = []string{
@@ -39,13 +44,16 @@ var siteSettingKeys = []string{
 	settingCategoriesEnabled,
 	settingProfileEnabled,
 	settingCommentsEnabled,
+	settingLikeEnabled,
 	settingSiteTitle,
 	settingProfileGithub,
 	settingProfileEmail,
 	settingProfileAvatar,
 	settingProfileAbout,
-	settingUserTokenExpireMinutes,
+	settingUserAccessTokenExpireMinutes,
+	settingUserRefreshTokenExpireMinutes,
 	settingAdminTokenExpireMinutes,
+	legacyUserTokenExpireMinutes,
 }
 
 var (
@@ -67,9 +75,29 @@ func (s *Service) GetAdminSiteSettings() (vo.SiteSettingVO, error) {
 	return s.GetSiteSettings()
 }
 
-// UserTokenDuration 获取用户 Access Token 和 Refresh Token 的有效时长；无参数；返回时长和查询错误。
-func (s *Service) UserTokenDuration() (time.Duration, error) {
-	return s.tokenDuration(settingUserTokenExpireMinutes, defaultUserTokenExpireMinutes)
+// UserAccessTokenDuration 获取用户 Access Token 的有效时长；无参数；返回时长和查询错误。
+func (s *Service) UserAccessTokenDuration() (time.Duration, error) {
+	return s.tokenDuration(settingUserAccessTokenExpireMinutes, defaultUserAccessTokenExpireMinutes)
+}
+
+// UserRefreshTokenDuration 获取用户 Refresh Token 的有效时长；无参数；返回时长和查询错误。
+// 优先读取新版配置键，若不存在则回退旧版统一配置键，保证历史数据不丢失。
+func (s *Service) UserRefreshTokenDuration() (time.Duration, error) {
+	settings, err := s.repo.GetSettings([]string{settingUserRefreshTokenExpireMinutes, legacyUserTokenExpireMinutes})
+	if err != nil {
+		return 0, err
+	}
+	values := make(map[string]string, len(settings))
+	for _, setting := range settings {
+		values[setting.Key] = setting.Value
+	}
+	minutes := defaultUserRefreshTokenExpireMinutes
+	if value, ok := values[settingUserRefreshTokenExpireMinutes]; ok {
+		minutes = parseTokenExpireMinutes(value, defaultUserRefreshTokenExpireMinutes)
+	} else if value, ok := values[legacyUserTokenExpireMinutes]; ok {
+		minutes = parseTokenExpireMinutes(value, defaultUserRefreshTokenExpireMinutes)
+	}
+	return time.Duration(minutes) * time.Minute, nil
 }
 
 // AdminTokenDuration 获取管理员 Token 的有效时长；无参数；返回时长和查询错误。
@@ -100,12 +128,14 @@ func (s *Service) UpdateSiteSettings(req dto.UpdateSiteSettingRequest) error {
 		{Key: settingCategoriesEnabled, Value: strconv.FormatBool(req.CategoriesEnabled)},
 		{Key: settingProfileEnabled, Value: strconv.FormatBool(req.ProfileEnabled)},
 		{Key: settingCommentsEnabled, Value: strconv.FormatBool(req.CommentsEnabled)},
+		{Key: settingLikeEnabled, Value: strconv.FormatBool(req.LikeEnabled)},
 		{Key: settingSiteTitle, Value: strings.TrimSpace(req.SiteTitle)},
 		{Key: settingProfileGithub, Value: strings.TrimSpace(req.ProfileGithub)},
 		{Key: settingProfileEmail, Value: strings.TrimSpace(req.ProfileEmail)},
 		{Key: settingProfileAvatar, Value: strings.TrimSpace(req.ProfileAvatar)},
 		{Key: settingProfileAbout, Value: strings.TrimSpace(req.ProfileAbout)},
-		{Key: settingUserTokenExpireMinutes, Value: strconv.Itoa(req.UserTokenExpireMinutes)},
+		{Key: settingUserAccessTokenExpireMinutes, Value: strconv.Itoa(req.UserAccessTokenExpireMinutes)},
+		{Key: settingUserRefreshTokenExpireMinutes, Value: strconv.Itoa(req.UserRefreshTokenExpireMinutes)},
 		{Key: settingAdminTokenExpireMinutes, Value: strconv.Itoa(req.AdminTokenExpireMinutes)},
 	}
 	return s.repo.UpsertSettings(settings)
@@ -145,6 +175,7 @@ func siteSettingFromRows(settings []models.Setting) vo.SiteSettingVO {
 		CategoriesEnabled: true,
 		ProfileEnabled:    true,
 		CommentsEnabled:   true,
+		LikeEnabled:       true,
 		SiteTitle:         "懂你",
 	}
 	values := make(map[string]string, len(settings))
@@ -155,6 +186,7 @@ func siteSettingFromRows(settings []models.Setting) vo.SiteSettingVO {
 	result.CategoriesEnabled = parseSettingBool(values[settingCategoriesEnabled], true)
 	result.ProfileEnabled = parseSettingBool(values[settingProfileEnabled], true)
 	result.CommentsEnabled = parseSettingBool(values[settingCommentsEnabled], true)
+	result.LikeEnabled = parseSettingBool(values[settingLikeEnabled], true)
 	if value := strings.TrimSpace(values[settingSiteTitle]); value != "" {
 		result.SiteTitle = value
 	}
@@ -162,8 +194,15 @@ func siteSettingFromRows(settings []models.Setting) vo.SiteSettingVO {
 	result.ProfileEmail = strings.TrimSpace(values[settingProfileEmail])
 	result.ProfileAvatar = strings.TrimSpace(values[settingProfileAvatar])
 	result.ProfileAbout = strings.TrimSpace(values[settingProfileAbout])
-	result.UserTokenExpireMinutes = parseTokenExpireMinutes(values[settingUserTokenExpireMinutes], defaultUserTokenExpireMinutes)
+	result.UserAccessTokenExpireMinutes = parseTokenExpireMinutes(values[settingUserAccessTokenExpireMinutes], defaultUserAccessTokenExpireMinutes)
 	result.AdminTokenExpireMinutes = parseTokenExpireMinutes(values[settingAdminTokenExpireMinutes], defaultAdminTokenExpireMinutes)
+	// Refresh 有效期优先读新键，历史数据回退旧版统一配置键。
+	result.UserRefreshTokenExpireMinutes = parseTokenExpireMinutes(values[settingUserRefreshTokenExpireMinutes], defaultUserRefreshTokenExpireMinutes)
+	if _, ok := values[settingUserRefreshTokenExpireMinutes]; !ok {
+		if legacy, exists := values[legacyUserTokenExpireMinutes]; exists {
+			result.UserRefreshTokenExpireMinutes = parseTokenExpireMinutes(legacy, defaultUserRefreshTokenExpireMinutes)
+		}
+	}
 	return result
 }
 
@@ -185,14 +224,20 @@ func parseTokenExpireMinutes(value string, fallback int) int {
 }
 
 func validateSiteSetting(req dto.UpdateSiteSettingRequest) error {
-	if req.UserTokenExpireMinutes < minTokenExpireMinutes || req.UserTokenExpireMinutes > maxTokenExpireMinutes {
-		return fmt.Errorf("%w: 用户Token有效期必须是1-999999的整数", ErrInvalidSiteSetting)
+	if req.UserAccessTokenExpireMinutes < minTokenExpireMinutes || req.UserAccessTokenExpireMinutes > maxTokenExpireMinutes {
+		return fmt.Errorf("%w: 用户Access Token有效期必须是1-999999的整数", ErrInvalidSiteSetting)
+	}
+	if req.UserRefreshTokenExpireMinutes < minTokenExpireMinutes || req.UserRefreshTokenExpireMinutes > maxTokenExpireMinutes {
+		return fmt.Errorf("%w: 用户Refresh Token有效期必须是1-999999的整数", ErrInvalidSiteSetting)
+	}
+	if req.UserAccessTokenExpireMinutes >= req.UserRefreshTokenExpireMinutes {
+		return fmt.Errorf("%w: Access Token有效期必须小于Refresh Token有效期", ErrInvalidSiteSetting)
 	}
 	if req.AdminTokenExpireMinutes < minTokenExpireMinutes || req.AdminTokenExpireMinutes > maxTokenExpireMinutes {
 		return fmt.Errorf("%w: 管理员Token有效期必须是1-999999的整数", ErrInvalidSiteSetting)
 	}
-	if title := strings.TrimSpace(req.SiteTitle); title == "" || len([]rune(title)) > 40 {
-		return fmt.Errorf("%w: 网站名称不能为空且不能超过40个字符", ErrInvalidSiteSetting)
+	if title := strings.TrimSpace(req.SiteTitle); title == "" || len([]rune(title)) > 6 {
+		return fmt.Errorf("%w: 网站名称不能为空且不能超过6个字符", ErrInvalidSiteSetting)
 	}
 	if err := validateOptionalURL(req.ProfileGithub, "GitHub地址"); err != nil {
 		return err

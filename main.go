@@ -8,7 +8,9 @@ import (
 	"blog/internal/router"
 	"blog/internal/utils"
 	"blog/seed"
+	"context"
 	"log"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -49,6 +51,10 @@ func main() {
 
 	//加载依赖
 	container := app.NewContainer(cfg, db, initRedis)
+	//启动点赞计数后台同步：Redis 缓冲累计，定时批量写回 MySQL，降低数据库压力。
+	syncCtx, cancelSync := context.WithCancel(context.Background())
+	defer cancelSync()
+	go container.Service.StartLikeSyncWorker(syncCtx, 30*time.Second)
 	//加载路由
 	r := router.Register(container)
 

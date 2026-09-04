@@ -154,9 +154,9 @@ func (h *UserHandler) TokenRefresh(c *gin.Context) {
 		response.ErrWithMsg(code.UserBanned, c)
 		return
 	}
-	tokenDuration, err := h.svc.UserTokenDuration()
+	tokenDuration, err := h.svc.UserAccessTokenDuration()
 	if err != nil {
-		zap.L().Error("read user token duration failed: " + err.Error())
+		zap.L().Error("read user access token duration failed: " + err.Error())
 		response.ErrWithMsg(code.InternalError, c)
 		return
 	}
@@ -341,7 +341,7 @@ func (h *UserHandler) GetArticles(c *gin.Context) {
 	response.SuccessWithData(map[string]interface{}{"list": articles, "total": total}, c)
 }
 
-// GetArticleRanking 返回点赞数最高的文章；接收可选 limit 查询参数；响应文章摘要列表或统一错误信息。
+// GetArticleRanking 返回浏览量最高的文章；接收可选 limit 查询参数；响应文章摘要列表或统一错误信息。
 func (h *UserHandler) GetArticleRanking(c *gin.Context) {
 	var q struct {
 		Limit int `form:"limit"`
@@ -640,6 +640,10 @@ func (h *UserHandler) LikeArticle(c *gin.Context) {
 		return
 	}
 	if err := h.svc.LikeArticle(req.ArticleID); err != nil {
+		if errors.Is(err, service.ErrFeatureDisabled) {
+			response.ErrWithMsg(code.FeatureDisabled, c)
+			return
+		}
 		zap.L().Error("LikeArticle:" + err.Error())
 		response.ErrWithMsg(code.InternalError, c)
 		return

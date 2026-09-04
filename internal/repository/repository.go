@@ -53,7 +53,7 @@ func (r *Repository) GetArticleByPage(page int, pageSize int) ([]vo.ArticleSimpl
 	return articleList, total, err
 }
 
-// GetArticleRanking 查询点赞数最高的已发布文章；参数 limit 为最多返回的文章数；返回文章摘要列表和查询错误。
+// GetArticleRanking 查询浏览量最高的已发布文章；参数 limit 为最多返回的文章数；返回文章摘要列表和查询错误。
 func (r *Repository) GetArticleRanking(limit int) ([]vo.ArticleSimple, error) {
 	articleList := make([]vo.ArticleSimple, 0)
 	err := r.db.Model(models.Article{}).
@@ -65,7 +65,7 @@ func (r *Repository) GetArticleRanking(limit int) ([]vo.ArticleSimple, error) {
 		`).
 		Joins("LEFT JOIN category c ON article.category_id = c.id").
 		Where("article.status = ?", 2).
-		Order("article.like_count DESC, article.created_at DESC").
+		Order("article.view_count DESC, article.created_at DESC").
 		Limit(limit).
 		Scan(&articleList).Error
 	return articleList, err
@@ -250,6 +250,15 @@ func (r *Repository) IncrementLikeCount(articleID uint64) error {
 		UpdateColumn("like_count", r.db.Raw("like_count + ?", 1)).Error
 }
 
+// AddLikeCount 为文章点赞数累加指定增量；参数 articleID 为文章 ID、delta 为增量；返回数据库更新错误。
+func (r *Repository) AddLikeCount(articleID uint64, delta int64) error {
+	if delta == 0 {
+		return nil
+	}
+	return r.db.Model(&models.Article{}).Where("id = ?", articleID).
+		UpdateColumn("like_count", r.db.Raw("like_count + ?", delta)).Error
+}
+
 func (r *Repository) UpdateArticleCommentCount(articleID uint64, delta int) error {
 	return r.db.Model(&models.Article{}).Where("id = ?", articleID).
 		UpdateColumn("comment_count", r.db.Raw("comment_count + ?", delta)).Error
@@ -339,10 +348,30 @@ func (r *Repository) LoginVerification(username, password string) (models.Admin,
 	return ad, nil
 }
 
-func (r *Repository) GetAllCategories() ([]models.Category, error) {
-	categories := make([]models.Category, 0)
-	err := r.db.Order("sort DESC").Find(&categories).Error
-	return categories, err
+// GetAllCategories 前台分类列表：附带每个分类下的文章数量与总浏览量；参数无；返回分类统计列表与查询错误。
+func (r *Repository) GetAllCategories() ([]vo.CategoryWithStats, error) {
+	result := make([]vo.CategoryWithStats, 0)
+	rows, err := r.db.
+		Table("category AS c").
+		Select(`c.id, c.name, c.description, c.cover, c.sort, c.created_at, c.updated_at,
+			COALESCE(SUM(CASE WHEN a.status = ? THEN 1 ELSE 0 END), 0) AS article_count,
+			COALESCE(SUM(CASE WHEN a.status = ? THEN a.view_count ELSE 0 END), 0) AS view_count`, 2, 2).
+		Joins("LEFT JOIN article a ON a.category_id = c.id").
+		Group("c.id").
+		Order("c.sort DESC, c.id DESC").
+		Rows()
+	if err != nil {
+		return result, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var item vo.CategoryWithStats
+		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.Cover, &item.Sort, &item.CreatedAt, &item.UpdatedAt, &item.ArticleCount, &item.ViewCount); err != nil {
+			return result, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
 }
 
 // 管理端：获取分类列表（带文章数量）

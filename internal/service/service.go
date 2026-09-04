@@ -185,7 +185,11 @@ func (s *Service) issuePCUserTokens(user models.User) (map[string]interface{}, e
 	if s.sessionRepo == nil {
 		return nil, errors.New("session repository is nil")
 	}
-	tokenDuration, err := s.UserTokenDuration()
+	accessDuration, err := s.UserAccessTokenDuration()
+	if err != nil {
+		return nil, err
+	}
+	refreshDuration, err := s.UserRefreshTokenDuration()
 	if err != nil {
 		return nil, err
 	}
@@ -193,18 +197,19 @@ func (s *Service) issuePCUserTokens(user models.User) (map[string]interface{}, e
 	if err != nil {
 		return nil, err
 	}
-	refreshToken, err := utils.GenerateUserTokenWithSession(user.ID, tokenDuration, "refresh", sessionID)
+	refreshToken, err := utils.GenerateUserTokenWithSession(user.ID, refreshDuration, "refresh", sessionID)
 	if err != nil {
 		return nil, err
 	}
-	accessToken, err := utils.GenerateUserTokenWithSession(user.ID, tokenDuration, "access", sessionID)
+	accessToken, err := utils.GenerateUserTokenWithSession(user.ID, accessDuration, "access", sessionID)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.sessionRepo.SaveUserSession(user.ID, sessionID, tokenDuration); err != nil {
+	// 登录会话与 Refresh Token 同生命周期，避免 Refresh 仍有效但会话被提前清除。
+	if err := s.sessionRepo.SaveUserSession(user.ID, sessionID, refreshDuration); err != nil {
 		return nil, err
 	}
-	if err := s.SaveRefreshToken(refreshTokenKey(user.ID), refreshToken, tokenDuration); err != nil {
+	if err := s.SaveRefreshToken(refreshTokenKey(user.ID), refreshToken, refreshDuration); err != nil {
 		return nil, err
 	}
 	return map[string]interface{}{
@@ -485,7 +490,7 @@ func (s *Service) GetArticles(page, pageSize int) ([]vo.ArticleSimple, int64, er
 	return s.repo.GetArticleByPage(page, pageSize)
 }
 
-// GetArticleRanking 获取点赞数最高的已发布文章；参数 limit 为最多返回数量；返回文章摘要列表和查询错误。
+// GetArticleRanking 获取浏览量最高的已发布文章；参数 limit 为最多返回数量；返回文章摘要列表和查询错误。
 func (s *Service) GetArticleRanking(limit int) ([]vo.ArticleSimple, error) {
 	if limit <= 0 || limit > 10 {
 		limit = 10
@@ -499,6 +504,14 @@ func (s *Service) GetArticle(id uint64) (vo.ArticleDetail, error) {
 		return detail, err
 	}
 	_ = s.repo.IncrementViewCount(id)
+	// 合并 Redis 中尚未同步到 MySQL 的点赞增量，让详情页点赞数实时准确。
+	if s.redis != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		if delta, err := s.redis.Get(ctx, articleLikeKey(id)).Int64(); err == nil && delta > 0 {
+			detail.LikeCount += uint64(delta)
+		}
+		cancel()
+	}
 	return detail, nil
 }
 
@@ -673,7 +686,7 @@ func (s *Service) SaveRefreshToken(key, token string, duration time.Duration) er
 	return nil
 }
 
-func (s *Service) GetCategories() ([]models.Category, error) {
+func (s *Service) GetCategories() ([]vo.CategoryWithStats, error) {
 	if err := s.RequireFeatureEnabled(settingCategoriesEnabled); err != nil {
 		return nil, err
 	}
@@ -824,9 +837,140 @@ func (s *Service) GetTags() ([]string, error) {
 	return s.repo.GetAllTags()
 }
 
+// LikeArticle 为文章点赞；参数 articleID 为文章 ID；返回业务或存储错误。
+// 点赞先写入 Redis 计数，由后台任务定时批量回写 MySQL，避免高并发点赞直接压垮数据库。
 func (s *Service) LikeArticle(articleID uint64) error {
+	if err := s.RequireFeatureEnabled(settingLikeEnabled); err != nil {
+		return err
+	}
+	if articleID == 0 {
+		return errors.New("invalid article id")
+	}
+	// Redis 可用时走缓冲计数。
+	if s.redis != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		key := articleLikeKey(articleID)
+		if err := s.redis.Incr(ctx, key).Err(); err == nil {
+			// 设置兜底过期时间，防止后台任务异常时 key 永久残留。
+			_ = s.redis.Expire(ctx, key, likeKeyTTL).Err()
+			return nil
+		}
+		// Redis 写失败降级为直写 MySQL，保证点赞功能可用。
+	}
 	return s.repo.IncrementLikeCount(articleID)
 }
+
+// SyncLikeCounts 将 Redis 中累积的点赞增量批量写回 MySQL；参数 ctx 为调用方上下文；返回同步错误。
+// 每个 key 通过 Lua 原子读取并删除，避免重复计数；写库失败的增量会重新放回 Redis 等待下次重试。
+func (s *Service) SyncLikeCounts(ctx context.Context) error {
+	if s.redis == nil {
+		return nil
+	}
+	deltas := make(map[uint64]int64)
+	var cursor uint64
+	for {
+		keys, nextCursor, err := s.redis.Scan(ctx, cursor, articleLikeKeyPrefix+"*", likeSyncScanBatch).Result()
+		if err != nil {
+			return err
+		}
+		for _, key := range keys {
+			articleID := parseArticleLikeKey(key)
+			if articleID == 0 {
+				continue
+			}
+			delta, err := getAndDelLikeDelta(ctx, s.redis, key)
+			if err != nil {
+				return err
+			}
+			if delta != 0 {
+				deltas[articleID] += delta
+			}
+		}
+		cursor = nextCursor
+		if cursor == 0 {
+			break
+		}
+	}
+	for articleID, delta := range deltas {
+		if err := s.repo.AddLikeCount(articleID, delta); err != nil {
+			// 写库失败则把增量放回 Redis，并刷新 TTL，等待下次同步重试。
+			key := articleLikeKey(articleID)
+			if incrErr := s.redis.IncrBy(ctx, key, delta).Err(); incrErr == nil {
+				_ = s.redis.Expire(ctx, key, likeKeyTTL).Err()
+			}
+			zap.L().Error("sync like count to mysql failed: " + err.Error())
+		}
+	}
+	return nil
+}
+
+// StartLikeSyncWorker 启动点赞计数后台同步任务；参数 ctx 为生命周期上下文、interval 为同步间隔；无返回值。
+func (s *Service) StartLikeSyncWorker(ctx context.Context, interval time.Duration) {
+	if s.redis == nil || interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.SyncLikeCounts(ctx); err != nil {
+				zap.L().Error("sync like counts: " + err.Error())
+			}
+		}
+	}
+}
+
+const (
+	articleLikeKeyPrefix = "article:like:"
+	likeKeyTTL           = 2 * time.Hour
+	likeSyncScanBatch    = 200
+)
+
+// articleLikeKey 生成文章点赞计数在 Redis 中的键；参数 articleID 为文章 ID；返回固定格式的键名。
+func articleLikeKey(articleID uint64) string {
+	return articleLikeKeyPrefix + strconv.FormatUint(articleID, 10)
+}
+
+// parseArticleLikeKey 从 Redis 键名解析文章 ID；参数 key 为键名；返回文章 ID，非法时返回 0。
+func parseArticleLikeKey(key string) uint64 {
+	if !strings.HasPrefix(key, articleLikeKeyPrefix) {
+		return 0
+	}
+	articleID, err := strconv.ParseUint(strings.TrimPrefix(key, articleLikeKeyPrefix), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return articleID
+}
+
+// getAndDelLikeDelta 原子读取并删除点赞计数键；参数为上下文、Redis 客户端和键名；返回计数增量和错误。
+func getAndDelLikeDelta(ctx context.Context, client *redis.Client, key string) (int64, error) {
+	val, err := likeGetDelScript.Run(ctx, client, []string{key}).Result()
+	if err == redis.Nil || val == nil {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	switch v := val.(type) {
+	case int64:
+		return v, nil
+	case string:
+		parsed, parseErr := strconv.ParseInt(v, 10, 64)
+		if parseErr != nil {
+			return 0, parseErr
+		}
+		return parsed, nil
+	}
+	return 0, nil
+}
+
+// likeGetDelScript 用 Lua 保证「读取并删除」的原子性，兼容各版本 Redis。
+var likeGetDelScript = redis.NewScript(`local v = redis.call('GET', KEYS[1]) if v then redis.call('DEL', KEYS[1]) end return v`)
 
 func (s *Service) GetComments(articleID uint64, page int) ([]vo.CommentVO, int64, error) {
 	if page < 1 {
@@ -935,6 +1079,12 @@ func (s *Service) UpdateArticle(req dto.UpdateArticleReq) error {
 	article.CategoryID = req.CategoryID
 	article.Tags = req.Tags
 	article.Status = req.Status
+	if req.ViewCount != nil {
+		article.ViewCount = *req.ViewCount
+	}
+	if req.LikeCount != nil {
+		article.LikeCount = *req.LikeCount
+	}
 	if req.Status == 2 && article.PublishTime == nil {
 		now := time.Now()
 		article.PublishTime = &now

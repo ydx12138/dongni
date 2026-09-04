@@ -69,15 +69,17 @@ type CreateArticleReq struct {
 }
 
 type UpdateArticleReq struct {
-	ID          uint64 `json:"id"`
-	Title       string `json:"title" binding:"required"`
-	Summary     string `json:"summary"`
-	Content     string `json:"content"`
-	ContentType int8   `json:"content_type"`
-	Cover       string `json:"cover"`
-	CategoryID  uint64 `json:"category_id"`
-	Tags        string `json:"tags"`
-	Status      int8   `json:"status"`
+	ID          uint64  `json:"id"`
+	Title       string  `json:"title" binding:"required"`
+	Summary     string  `json:"summary"`
+	Content     string  `json:"content"`
+	ContentType int8    `json:"content_type"`
+	Cover       string  `json:"cover"`
+	CategoryID  uint64  `json:"category_id"`
+	Tags        string  `json:"tags"`
+	Status      int8    `json:"status"`
+	ViewCount   *uint64 `json:"view_count"`
+	LikeCount   *uint64 `json:"like_count"`
 }
 
 type PageQueryWithSize struct {

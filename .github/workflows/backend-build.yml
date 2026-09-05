@@ -1,4 +1,4 @@
-name: Backend Build
+name: Build and Deploy Backend
 
 on:
   push:
@@ -10,21 +10,49 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 拉取代码
-        uses: actions/checkout@v5
+      # 1. 拉取代码
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: 安装 Go
-        uses: actions/setup-go@v6
+      # 2. 配置 Go
+      - name: Setup Go
+        uses: actions/setup-go@v5
         with:
           go-version: '1.25'
 
-      - name: 下载依赖
+      # 3. 下载依赖
+      - name: Download dependencies
         run: go mod download
 
-      - name: 编译后端
-        run: go build -o blog .
-
-      - name: 检查编译结果
+      # 4. 构建
+      - name: Build
         run: |
-          ls -lh blog
-          file blog
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o blog .
+
+      # 5. 上传 blog 到服务器
+      - name: Upload blog
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: 22
+          source: "blog"
+          target: "/home/blog/backend/"
+
+      # 6. SSH 执行部署命令
+      - name: Restart blog
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: 22
+          script: |
+            set -e
+
+            chmod +x /home/blog/backend/blog
+
+            supervisorctl restart blog
+
+            echo "Blog deployment completed!"

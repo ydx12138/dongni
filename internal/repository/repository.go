@@ -4,6 +4,7 @@ import (
 	"blog/models"
 	"blog/models/vo"
 	"errors"
+	"sort"
 	"strings"
 	"time"
 
@@ -243,6 +244,176 @@ func (r *Repository) GetAllTags() ([]string, error) {
 		result = append(result, t)
 	}
 	return result, nil
+}
+
+// GetTagCloud 统计每个标签下的已发布文章数，按文章数降序、名称升序返回。
+// 参数：无；返回标签统计列表和查询错误。
+func (r *Repository) GetTagCloud() ([]vo.TagItem, error) {
+	articles := make([]models.Article, 0)
+	if err := r.db.Select("tags").Where("status = ? AND tags != ''", 2).Find(&articles).Error; err != nil {
+		return nil, err
+	}
+	counts := make(map[string]int64)
+	for _, a := range articles {
+		for _, t := range strings.Split(a.Tags, ",") {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				counts[t]++
+			}
+		}
+	}
+	result := make([]vo.TagItem, 0, len(counts))
+	for name, count := range counts {
+		result = append(result, vo.TagItem{Name: name, Count: count})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Count != result[j].Count {
+			return result[i].Count > result[j].Count
+		}
+		return result[i].Name < result[j].Name
+	})
+	return result, nil
+}
+
+// GetArticlesByTag 分页查询指定标签下的已发布文章；参数 tag 为标签名、page 为页码、pageSize 为每页数量；
+// 返回文章摘要列表、总数和查询错误。使用 FIND_IN_SET 匹配逗号分隔的 tags 字段（MySQL 专用）。
+func (r *Repository) GetArticlesByTag(tag string, page int, pageSize int) ([]vo.ArticleSimple, int64, error) {
+	articleList := make([]vo.ArticleSimple, 0)
+	var total int64
+
+	base := func(db *gorm.DB) *gorm.DB {
+		return db.Model(&models.Article{}).
+			Where("article.status = ?", 2).
+			Where("FIND_IN_SET(?, article.tags)", tag)
+	}
+
+	if err := base(r.db).Count(&total).Error; err != nil {
+		zap.L().Error("GetArticlesByTag count:" + err.Error())
+		return articleList, total, err
+	}
+
+	err := base(r.db).
+		Select(`
+			article.id, article.title, article.summary, article.cover,
+			article.category_id, c.name AS category_name,
+			article.view_count, article.like_count, article.comment_count,
+			article.tags, article.created_at, article.updated_at
+		`).
+		Joins("LEFT JOIN category c ON article.category_id = c.id").
+		Order("article.created_at DESC").
+		Limit(pageSize).Offset((page - 1) * pageSize).
+		Scan(&articleList).Error
+	return articleList, total, err
+}
+
+// GetArchiveByYear 查询所有已发布文章并按年份分组，返回倒序排列的归档数据。
+// 一次性把已发布文章的精简信息查回，按 created_at 的年份在内存里聚合。
+func (r *Repository) GetArchiveByYear() (vo.ArchiveResult, error) {
+	var items []vo.ArchiveItem
+	err := r.db.Model(&models.Article{}).
+		Select(`
+			article.id, article.title, article.cover, c.name AS category_name,
+			article.tags, article.created_at
+		`).
+		Joins("LEFT JOIN category c ON article.category_id = c.id").
+		Where("article.status = ?", 2).
+		Order("article.created_at DESC").
+		Scan(&items).Error
+	if err != nil {
+		return vo.ArchiveResult{}, err
+	}
+
+	groups := make(map[int][]vo.ArchiveItem)
+	for _, it := range items {
+		y := it.CreatedAt.Year()
+		groups[y] = append(groups[y], it)
+	}
+	years := make([]int, 0, len(groups))
+	for y := range groups {
+		years = append(years, y)
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(years)))
+
+	result := vo.ArchiveResult{Total: len(items), Years: make([]vo.ArchiveYear, 0, len(years))}
+	for _, y := range years {
+		result.Years = append(result.Years, vo.ArchiveYear{
+			Year:     y,
+			Count:    len(groups[y]),
+			Articles: groups[y],
+		})
+	}
+	return result, nil
+}
+
+// splitTags 把逗号分隔的 tags 字符串拆成去空、去首尾空格的列表。
+func splitTags(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// GetRelatedArticles 查询与指定文章相关的其他已发布文章，按"同分类优先 + 共同标签数"打分排序，取 limit 条。
+// 文章自身会被排除；找不到候选时返回空切片而不是错误。
+func (r *Repository) GetRelatedArticles(articleID uint64, limit int) ([]vo.ArticleSimple, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	var current models.Article
+	if err := r.db.Select("id, category_id, tags").First(&current, articleID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return []vo.ArticleSimple{}, nil
+		}
+		return nil, err
+	}
+	tagList := splitTags(current.Tags)
+
+	// 相关度表达式：同分类 +3，每个共同标签 +1
+	scoreExpr := "(CASE WHEN a.category_id = ? THEN 3 ELSE 0 END)"
+	scoreArgs := []interface{}{current.CategoryID}
+	for _, t := range tagList {
+		scoreExpr += " + IF(FIND_IN_SET(?, a.tags) > 0, 1, 0)"
+		scoreArgs = append(scoreArgs, t)
+	}
+
+	// 候选条件：同分类 OR 包含任一共同标签
+	condExpr := "(a.category_id = ?"
+	condArgs := []interface{}{current.CategoryID}
+	for _, t := range tagList {
+		condExpr += " OR FIND_IN_SET(?, a.tags)"
+		condArgs = append(condArgs, t)
+	}
+	condExpr += ")"
+
+	selectClause := `
+		a.id, a.title, a.summary, a.cover,
+		a.category_id, c.name AS category_name,
+		a.view_count, a.like_count, a.comment_count,
+		a.tags, a.created_at, a.updated_at,
+		` + scoreExpr + ` AS relevance
+	`
+
+	var list []vo.ArticleSimple
+	err := r.db.Table("article a").
+		Select(selectClause).
+		Joins("LEFT JOIN category c ON a.category_id = c.id").
+		Where("a.status = ? AND a.id <> ?", 2, articleID).
+		Where(condExpr, condArgs...).
+		Order("relevance DESC, a.created_at DESC").
+		Limit(limit).
+		Scan(&list).Error
+	if err != nil {
+		return nil, err
+	}
+	return list, nil
 }
 
 func (r *Repository) IncrementLikeCount(articleID uint64) error {
@@ -773,4 +944,54 @@ func (r *Repository) SaveToken(userID uint64, token string) error {
 		ExpiresAt: time.Now().Add(7 * 24 * time.Hour),
 	}
 	return r.db.Where("user_id = ?", userID).Assign(tk).FirstOrCreate(&tk).Error
+}
+
+// ===== 友情链接 =====
+
+// ListEnabledFriendLinks 返回所有启用状态（status=1）的友情链接，按 sort 升序、再按 id 升序。
+func (r *Repository) ListEnabledFriendLinks() ([]models.FriendLink, error) {
+	var links []models.FriendLink
+	err := r.db.Model(&models.FriendLink{}).
+		Where("status = ?", 1).
+		Order("sort ASC, id ASC").
+		Find(&links).Error
+	return links, err
+}
+
+// ListAllFriendLinks 返回所有友情链接（后台用），按 sort 升序、再按 id 升序。
+func (r *Repository) ListAllFriendLinks() ([]models.FriendLink, error) {
+	var links []models.FriendLink
+	err := r.db.Model(&models.FriendLink{}).
+		Order("sort ASC, id ASC").
+		Find(&links).Error
+	return links, err
+}
+
+// GetFriendLink 根据 ID 查询友情链接；返回友链和错误（gorm.ErrRecordNotFound 表示不存在）。
+func (r *Repository) GetFriendLink(id uint64) (models.FriendLink, error) {
+	var link models.FriendLink
+	err := r.db.First(&link, id).Error
+	return link, err
+}
+
+// CreateFriendLink 新建友情链接；返回数据库错误。
+func (r *Repository) CreateFriendLink(link *models.FriendLink) error {
+	return r.db.Create(link).Error
+}
+
+// UpdateFriendLink 更新友情链接；返回数据库错误。
+func (r *Repository) UpdateFriendLink(link *models.FriendLink) error {
+	return r.db.Model(link).Updates(map[string]interface{}{
+		"name":        link.Name,
+		"url":         link.URL,
+		"logo":        link.Logo,
+		"description": link.Description,
+		"sort":        link.Sort,
+		"status":      link.Status,
+	}).Error
+}
+
+// DeleteFriendLink 删除友情链接；返回数据库错误。
+func (r *Repository) DeleteFriendLink(id uint64) error {
+	return r.db.Delete(&models.FriendLink{}, id).Error
 }

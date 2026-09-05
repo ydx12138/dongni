@@ -18,6 +18,9 @@ func Register(container *app.Container) *gin.Engine {
 		c.String(200, "ok")
 	})
 
+	// RSS 2.0 订阅源
+	r.GET("/feed.xml", h.User.FeedXML)
+
 	api := r.Group("/api")
 	{
 		public := api.Group("")
@@ -42,6 +45,11 @@ func Register(container *app.Container) *gin.Engine {
 		public.POST("/wechat/phone", h.User.CompleteWechatPhoneLogin)
 		public.POST("/articles/like", h.User.LikeArticle)
 		public.GET("/tags", h.User.GetTags)
+		public.GET("/tags/cloud", h.User.GetTagCloud)
+		public.GET("/tags/articles", h.User.GetArticlesByTag)
+		public.GET("/articles/archive", h.User.GetArchive)
+		public.GET("/articles/related", h.User.GetRelatedArticles)
+		public.GET("/links", h.User.GetLinks)
 		public.GET("/settings/site", h.User.GetSiteSettings)
 		public.POST("/sendpwdcode", h.User.SendCodeForgetPwd)
 		public.POST("/updatePasswordByCode", h.User.UpdatePasswordByCode)
@@ -95,6 +103,12 @@ func Register(container *app.Container) *gin.Engine {
 	adminAuth.GET("/categories/:id/articles", h.Admin.GetCategoryArticles)
 	adminAuth.GET("/categories/:id/article-count", h.Admin.GetCategoryArticleCount)
 	adminAuth.POST("/categories/transfer", h.Admin.TransferArticles)
+
+	// 友链管理
+	adminAuth.GET("/friend-links", h.Admin.AdminListFriendLinks)
+	adminAuth.POST("/friend-links", h.Admin.AdminCreateFriendLink)
+	adminAuth.PUT("/friend-links/:id", h.Admin.AdminUpdateFriendLink)
+	adminAuth.DELETE("/friend-links/:id", h.Admin.AdminDeleteFriendLink)
 
 	return r
 }

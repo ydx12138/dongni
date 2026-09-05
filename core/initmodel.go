@@ -21,6 +21,7 @@ func InitModel(db *gorm.DB) {
 		&model2.Comment{},
 		&model2.Token{},
 		&model2.Setting{},
+		&model2.FriendLink{},
 	)
 	if err != nil {
 		zap.L().Panic("migrate tables failed: " + err.Error())

@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"strings"
 
-	openapi "github.com/alibabacloud-go/darabonba-openapi/v2/client"
-	dypnsapi20170525 "github.com/alibabacloud-go/dypnsapi-20170525/v3/client"
-	util "github.com/alibabacloud-go/tea-utils/v2/service"
+	openapi ".github.com/alibabacloud-go/darabonba-openapi/v2/client"
+	dypnsapi20170525 ".github.com/alibabacloud-go/dypnsapi-20170525/v3/client"
+	util ".github.com/alibabacloud-go/tea-utils/v2/service"
 	"github.com/alibabacloud-go/tea/tea"
 	"go.uber.org/zap"
 )

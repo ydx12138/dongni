@@ -633,6 +633,143 @@ func (h *UserHandler) GetTags(c *gin.Context) {
 	response.SuccessWithData(tags, c)
 }
 
+// GetTagCloud 返回标签云（标签名 + 已发布文章数）；响应标签统计列表或统一错误信息。
+func (h *UserHandler) GetTagCloud(c *gin.Context) {
+	tags, err := h.svc.GetTagCloud()
+	if err != nil {
+		zap.L().Error("GetTagCloud:" + err.Error())
+		response.ErrWithMsg(code.InternalError, c)
+		return
+	}
+	response.SuccessWithData(tags, c)
+}
+
+// GetLinks 返回所有启用的友情链接（status=1），按 sort 升序；前台公开接口。
+func (h *UserHandler) GetLinks(c *gin.Context) {
+	links, err := h.svc.ListEnabledFriendLinks()
+	if err != nil {
+		zap.L().Error("GetLinks:" + err.Error())
+		response.ErrWithMsg(code.InternalError, c)
+		return
+	}
+	response.SuccessWithData(links, c)
+}
+
+// GetArticlesByTag 返回指定标签下的已发布文章；接收 tag、page、page_size 查询参数；响应文章列表、总数或统一错误信息。
+func (h *UserHandler) GetArticlesByTag(c *gin.Context) {
+	var q struct {
+		Tag      string `form:"tag"`
+		Page     int    `form:"page"`
+		PageSize int    `form:"page_size"`
+	}
+	if err := c.ShouldBindQuery(&q); err != nil {
+		response.ErrWithMsg(code.BadRequest, c)
+		return
+	}
+	articles, total, err := h.svc.GetArticlesByTag(q.Tag, q.Page, q.PageSize)
+	if err != nil {
+		zap.L().Error("GetArticlesByTag:" + err.Error())
+		response.ErrWithMsg(code.InternalError, c)
+		return
+	}
+	response.SuccessWithData(map[string]interface{}{"list": articles, "total": total}, c)
+}
+
+// GetArchive 输出按年份聚合的归档数据；无查询参数；返回年份节点（年份、文章数、文章列表）。
+func (h *UserHandler) GetArchive(c *gin.Context) {
+	data, err := h.svc.GetArchive()
+	if err != nil {
+		zap.L().Error("GetArchive:" + err.Error())
+		response.ErrWithMsg(code.InternalError, c)
+		return
+	}
+	response.SuccessWithData(data, c)
+}
+
+// GetRelatedArticles 输出与指定文章相关的其他已发布文章；参数 id 为文章 ID、limit 为返回数量（默认 5）。
+func (h *UserHandler) GetRelatedArticles(c *gin.Context) {
+	var q struct {
+		ID    uint64 `form:"id"`
+		Limit int    `form:"limit"`
+	}
+	if err := c.ShouldBindQuery(&q); err != nil {
+		response.ErrWithMsg(code.BadRequest, c)
+		return
+	}
+	if q.ID == 0 {
+		response.ErrWithMsg(code.BadRequest, c)
+		return
+	}
+	if q.Limit <= 0 || q.Limit > 20 {
+		q.Limit = 5
+	}
+	articles, err := h.svc.GetRelatedArticles(q.ID, q.Limit)
+	if err != nil {
+		zap.L().Error("GetRelatedArticles:" + err.Error())
+		response.ErrWithMsg(code.InternalError, c)
+		return
+	}
+	response.SuccessWithData(map[string]interface{}{"list": articles}, c)
+}
+
+// FeedXML 输出 RSS 2.0 订阅源；无查询参数；响应最近 20 篇已发布文章的 XML，供 RSS 阅读器订阅。
+func (h *UserHandler) FeedXML(c *gin.Context) {
+	title := "ydx的博客"
+	if settings, err := h.svc.GetSiteSettings(); err == nil && strings.TrimSpace(settings.SiteTitle) != "" {
+		title = strings.TrimSpace(settings.SiteTitle)
+	}
+
+	// 域名与协议：优先反向代理透传头，否则使用请求自身信息。
+	scheme := "http"
+	if proto := c.GetHeader("X-Forwarded-Proto"); proto != "" {
+		scheme = proto
+	}
+	host := c.GetHeader("X-Forwarded-Host")
+	if host == "" {
+		host = c.Request.Host
+	}
+	baseURL := scheme + "://" + host
+
+	articles, _, err := h.svc.GetArticles(1, 20)
+	if err != nil {
+		zap.L().Error("FeedXML GetArticles:" + err.Error())
+		articles = []vo.ArticleSimple{}
+	}
+
+	var b strings.Builder
+	b.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
+	b.WriteString("<rss version=\"2.0\"><channel>\n")
+	b.WriteString("<title>" + xmlEscape(title) + "</title>\n")
+	b.WriteString("<link>" + xmlEscape(baseURL) + "</link>\n")
+	b.WriteString("<description>" + xmlEscape(title+" 的最新文章") + "</description>\n")
+	b.WriteString("<lastBuildDate>" + time.Now().Format(time.RFC1123Z) + "</lastBuildDate>\n")
+	for _, a := range articles {
+		link := baseURL + "/posts/" + strconv.FormatUint(a.ID, 10)
+		b.WriteString("<item>\n")
+		b.WriteString("<title>" + xmlEscape(a.Title) + "</title>\n")
+		b.WriteString("<link>" + xmlEscape(link) + "</link>\n")
+		b.WriteString("<guid isPermaLink=\"false\">" + xmlEscape(link) + "</guid>\n")
+		b.WriteString("<description>" + xmlEscape(a.Summary) + "</description>\n")
+		b.WriteString("<pubDate>" + a.CreatedAt.Format(time.RFC1123Z) + "</pubDate>\n")
+		b.WriteString("</item>\n")
+	}
+	b.WriteString("</channel></rss>\n")
+
+	c.Header("Content-Type", "application/rss+xml; charset=utf-8")
+	c.String(http.StatusOK, b.String())
+}
+
+// xmlEscape 转义 XML 特殊字符；参数为待转义文本；返回安全的 XML 文本。
+func xmlEscape(s string) string {
+	return strings.NewReplacer(
+		"&", "&amp;",
+		"<", "&lt;",
+		">", "&gt;",
+		"\"", "&quot;",
+		"'", "&apos;",
+	).Replace(s)
+}
+
 func (h *UserHandler) LikeArticle(c *gin.Context) {
 	var req dto.ArticleLikeReq
 	if err := c.ShouldBind(&req); err != nil {
@@ -1227,4 +1364,66 @@ func currentUserID(c *gin.Context) (uint64, bool) {
 	}
 	uid, ok := userID.(uint64)
 	return uid, ok
+}
+
+// AdminListFriendLinks 后台：返回所有友情链接（包含禁用）。
+func (h *AdminHandler) AdminListFriendLinks(c *gin.Context) {
+	links, err := h.svc.AdminListFriendLinks()
+	if err != nil {
+		zap.L().Error("AdminListFriendLinks:" + err.Error())
+		response.ErrWithMsg(code.InternalError, c)
+		return
+	}
+	response.SuccessWithData(links, c)
+}
+
+// AdminCreateFriendLink 后台：新建友情链接。
+func (h *AdminHandler) AdminCreateFriendLink(c *gin.Context) {
+	var req dto.CreateFriendLinkReq
+	if err := c.ShouldBind(&req); err != nil {
+		response.ErrWithMsg(code.BadRequest, c)
+		return
+	}
+	link, err := h.svc.AdminCreateFriendLink(req)
+	if err != nil {
+		zap.L().Error("AdminCreateFriendLink:" + err.Error())
+		response.ErrWithMsg(code.InternalError, c)
+		return
+	}
+	response.SuccessWithData(link, c)
+}
+
+// AdminUpdateFriendLink 后台：更新友情链接。
+func (h *AdminHandler) AdminUpdateFriendLink(c *gin.Context) {
+	id, err := parseParamID(c)
+	if err != nil {
+		response.ErrWithMsg(code.BadRequest, c)
+		return
+	}
+	var req dto.UpdateFriendLinkReq
+	if err := c.ShouldBind(&req); err != nil {
+		response.ErrWithMsg(code.BadRequest, c)
+		return
+	}
+	if err := h.svc.AdminUpdateFriendLink(id, req); err != nil {
+		zap.L().Error("AdminUpdateFriendLink:" + err.Error())
+		response.ErrWithMsg(code.InternalError, c)
+		return
+	}
+	response.SuccessWithMsg("更新成功", c)
+}
+
+// AdminDeleteFriendLink 后台：删除友情链接。
+func (h *AdminHandler) AdminDeleteFriendLink(c *gin.Context) {
+	id, err := parseParamID(c)
+	if err != nil {
+		response.ErrWithMsg(code.BadRequest, c)
+		return
+	}
+	if err := h.svc.AdminDeleteFriendLink(id); err != nil {
+		zap.L().Error("AdminDeleteFriendLink:" + err.Error())
+		response.ErrWithMsg(code.InternalError, c)
+		return
+	}
+	response.SuccessWithMsg("删除成功", c)
 }

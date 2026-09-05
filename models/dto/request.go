@@ -181,3 +181,21 @@ type TransferArticlesReq struct {
 	FromCategoryID uint64 `json:"from_category_id" binding:"required"`
 	ToCategoryID   uint64 `json:"to_category_id" binding:"required"`
 }
+
+// 友情链接管理
+type CreateFriendLinkReq struct {
+	Name        string `json:"name" binding:"required,max=50"`
+	URL         string `json:"url" binding:"required,max=500"`
+	Logo        string `json:"logo"`
+	Description string `json:"description" binding:"max=255"`
+	Sort        int    `json:"sort"`
+}
+
+type UpdateFriendLinkReq struct {
+	Name        string `json:"name" binding:"max=50"`
+	URL         string `json:"url" binding:"max=500"`
+	Logo        string `json:"logo"`
+	Description string `json:"description" binding:"max=255"`
+	Sort        int    `json:"sort"`
+	Status      *int8  `json:"status"`
+}

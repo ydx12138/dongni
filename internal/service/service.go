@@ -837,6 +837,40 @@ func (s *Service) GetTags() ([]string, error) {
 	return s.repo.GetAllTags()
 }
 
+// GetTagCloud 获取标签云及每个标签下的已发布文章数；无参数；返回标签统计列表和查询错误。
+func (s *Service) GetTagCloud() ([]vo.TagItem, error) {
+	return s.repo.GetTagCloud()
+}
+
+// GetArticlesByTag 分页获取指定标签下的已发布文章；参数 tag 为标签名、page 为页码、pageSize 为每页数量；
+// 返回文章摘要列表、总数和业务或存储错误。
+func (s *Service) GetArticlesByTag(tag string, page int, pageSize int) ([]vo.ArticleSimple, int64, error) {
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		return nil, 0, errors.New("invalid tag")
+	}
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 10
+	}
+	return s.repo.GetArticlesByTag(tag, page, pageSize)
+}
+
+// GetArchive 按年份聚合已发布文章，返回归档页所需的数据结构。
+func (s *Service) GetArchive() (vo.ArchiveResult, error) {
+	return s.repo.GetArchiveByYear()
+}
+
+// GetRelatedArticles 查询与指定文章相关的其他已发布文章。
+func (s *Service) GetRelatedArticles(articleID uint64, limit int) ([]vo.ArticleSimple, error) {
+	if articleID == 0 {
+		return []vo.ArticleSimple{}, nil
+	}
+	return s.repo.GetRelatedArticles(articleID, limit)
+}
+
 // LikeArticle 为文章点赞；参数 articleID 为文章 ID；返回业务或存储错误。
 // 点赞先写入 Redis 计数，由后台任务定时批量回写 MySQL，避免高并发点赞直接压垮数据库。
 func (s *Service) LikeArticle(articleID uint64) error {
@@ -1247,4 +1281,69 @@ func refreshTokenKey(userid uint64) string {
 // 把邮件规范化（大写改成小写）
 func normalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
+}
+
+// ===== 友情链接 =====
+
+// ListEnabledFriendLinks 前台公开：返回所有启用的友情链接。
+func (s *Service) ListEnabledFriendLinks() ([]models.FriendLink, error) {
+	return s.repo.ListEnabledFriendLinks()
+}
+
+// AdminListFriendLinks 后台：返回所有友情链接（包含禁用）。
+func (s *Service) AdminListFriendLinks() ([]models.FriendLink, error) {
+	return s.repo.ListAllFriendLinks()
+}
+
+// AdminCreateFriendLink 新建友情链接；URL 必须合法，名称长度 1-50。
+func (s *Service) AdminCreateFriendLink(req dto.CreateFriendLinkReq) (models.FriendLink, error) {
+	name := strings.TrimSpace(req.Name)
+	if name == "" || len([]rune(name)) > 50 {
+		return models.FriendLink{}, errors.New("友情链接名称不合法")
+	}
+	url := strings.TrimSpace(req.URL)
+	if url == "" {
+		return models.FriendLink{}, errors.New("友情链接 URL 不能为空")
+	}
+	link := models.FriendLink{
+		Name:        name,
+		URL:         url,
+		Logo:        strings.TrimSpace(req.Logo),
+		Description: strings.TrimSpace(req.Description),
+		Sort:        req.Sort,
+		Status:      1,
+	}
+	if err := s.repo.CreateFriendLink(&link); err != nil {
+		return models.FriendLink{}, err
+	}
+	return link, nil
+}
+
+// AdminUpdateFriendLink 更新友情链接；status 为 nil 时不修改；name/url 为空时保留原值。
+func (s *Service) AdminUpdateFriendLink(id uint64, req dto.UpdateFriendLinkReq) error {
+	link, err := s.repo.GetFriendLink(id)
+	if err != nil {
+		return err
+	}
+	if name := strings.TrimSpace(req.Name); name != "" {
+		if len([]rune(name)) > 50 {
+			return errors.New("友情链接名称不合法")
+		}
+		link.Name = name
+	}
+	if u := strings.TrimSpace(req.URL); u != "" {
+		link.URL = u
+	}
+	link.Logo = strings.TrimSpace(req.Logo)
+	link.Description = strings.TrimSpace(req.Description)
+	link.Sort = req.Sort
+	if req.Status != nil {
+		link.Status = *req.Status
+	}
+	return s.repo.UpdateFriendLink(&link)
+}
+
+// AdminDeleteFriendLink 删除友情链接。
+func (s *Service) AdminDeleteFriendLink(id uint64) error {
+	return s.repo.DeleteFriendLink(id)
 }
